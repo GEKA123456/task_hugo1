@@ -17,6 +17,7 @@ FROM alpine:latest
 
 # Добавляем исполняемый файл из первой стадии в корневую директорию контейнера
 COPY --from=builder /app/main /main
+COPY /docs/swagger.json /docs/swagger.json
 
 # Открываем порт 8080
 EXPOSE 8080
