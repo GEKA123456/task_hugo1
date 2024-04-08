@@ -59,17 +59,12 @@ func Test_handleRoutes(t *testing.T) {
 		fmt.Fprintln(w, mockResGeo)
 	})
 
-	handlerSearch500 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	})
-	handlerGeo500 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler500 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 
-	serverSearch500 := httptest.NewServer(handlerSearch500)
-	defer serverSearch500.Close()
-	serverGeo500 := httptest.NewServer(handlerGeo500)
-	defer serverGeo500.Close()
+	server500 := httptest.NewServer(handler500)
+	defer server500.Close()
 
 	serverSearch := httptest.NewServer(handlerSearch)
 	defer serverSearch.Close()
@@ -86,11 +81,14 @@ func Test_handleRoutes(t *testing.T) {
 	wantSearch := `{"addresses":[{"address":"г Москва, ул Сухонская, д 11","lat":55.8782557,"lon":37.65372}]}`
 	wantGeo := "{\"addresses\":[{\"address\":\"г Москва, ул Сухонская, д 11\",\"lat\":55.878315,\"lon\":37.65372},{\"address\":\"г Москва, ул Сухонская, д 11А\",\"lat\":55.878212,\"lon\":37.652016},{\"address\":\"г Москва, ул Сухонская, д 13\",\"lat\":55.878666,\"lon\":37.6524},{\"address\":\"г Москва, ул Сухонская, д 9\",\"lat\":55.877167,\"lon\":37.652481},{\"address\":\"г Москва\",\"lat\":55.75396,\"lon\":37.620393}]}"
 
+	token := "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJsb2dpbiI6IlVzZXIxIiwicGFzc3dvcmQiOiIkMmEkMTAkaVUyaTQuTGdhdnEuZE9rdmtoZDZyZVY4QUVNbm1CLy5KWmJCOVpMZ2ZSYXVHY2ZnOHZWWmUifQ.h3iq4QISSdE1x4m7vVv9_U9fZukQagVlxvodMuwXaro"
+
 	type args struct {
 		serverAPI *httptest.Server
 		Method    string
 		Url       string
 		Body      io.Reader
+		token     string
 	}
 
 	tests := []struct {
@@ -100,14 +98,15 @@ func Test_handleRoutes(t *testing.T) {
 		want       string
 		wantStatus int
 	}{
-		{"1", ts, args{serverAPI: serverSearch, Method: "POST", Url: "/api/address/search", Body: strings.NewReader(bodySearch)}, wantSearch, http.StatusOK},
-		{"2", ts, args{serverAPI: serverGeo, Method: "POST", Url: "/api/address/geocode", Body: strings.NewReader(bodyGeo)}, wantGeo, http.StatusOK},
-		{"3", ts, args{serverAPI: serverSearch, Method: "GET", Url: "/api/address/search", Body: strings.NewReader(bodySearch)}, "{\"error\":\"Method not allowed\"}\n", http.StatusMethodNotAllowed},
-		{"4", ts, args{serverAPI: serverGeo, Method: "GET", Url: "/api/address/geocode", Body: strings.NewReader(bodyGeo)}, "{\"error\":\"Method not allowed\"}\n", http.StatusMethodNotAllowed},
-		{"5", ts, args{serverAPI: serverSearch, Method: "POST", Url: "/api/address/search", Body: strings.NewReader(`dk&&*^jd@!)54;fjh`)}, "{\"error\":\"bad request: main.go 119: error read body Search: invalid character 'd' looking for beginning of value\"}\n", http.StatusBadRequest},
-		{"6", ts, args{serverAPI: serverGeo, Method: "POST", Url: "/api/address/geocode", Body: strings.NewReader(`dk&&*^jd@!)54;fjh`)}, "{\"error\":\"bad request: main.go 217: error read body geoCode: invalid character 'd' looking for beginning of value\"}\n", http.StatusBadRequest},
-		{"7", ts, args{serverAPI: serverSearch500, Method: "POST", Url: "/api/address/search", Body: strings.NewReader(bodySearch)}, "{\"error\":\"Internal Server Error\"}\n", http.StatusInternalServerError},
-		{"8", ts, args{serverAPI: serverGeo500, Method: "POST", Url: "/api/address/geocode", Body: strings.NewReader(bodyGeo)}, "{\"error\":\"Internal Server Error\"}\n", http.StatusInternalServerError},
+		{"1", ts, args{serverAPI: serverSearch, Method: "POST", Url: "/api/address/search", Body: strings.NewReader(bodySearch), token: token}, wantSearch, http.StatusOK},
+		{"2", ts, args{serverAPI: serverGeo, Method: "POST", Url: "/api/address/geocode", Body: strings.NewReader(bodyGeo), token: token}, wantGeo, http.StatusOK},
+		{"3", ts, args{serverAPI: serverSearch, Method: "GET", Url: "/api/address/search", Body: strings.NewReader(bodySearch), token: token}, "{\"error\":\"Method not allowed\"}\n", http.StatusMethodNotAllowed},
+		{"4", ts, args{serverAPI: serverGeo, Method: "GET", Url: "/api/address/geocode", Body: strings.NewReader(bodyGeo), token: token}, "{\"error\":\"Method not allowed\"}\n", http.StatusMethodNotAllowed},
+		{"5", ts, args{serverAPI: serverSearch, Method: "POST", Url: "/api/address/search", Body: strings.NewReader(`dk&&*^jd@!)54;fjh`), token: token}, "{\"error\":\"bad request: main.go 400: error read body Search: invalid character 'd' looking for beginning of value\"}\n", http.StatusBadRequest},
+		{"6", ts, args{serverAPI: serverGeo, Method: "POST", Url: "/api/address/geocode", Body: strings.NewReader(`dk&&*^jd@!)54;fjh`), token: token}, "{\"error\":\"bad request: main.go 492: error read body geoCode: invalid character 'd' looking for beginning of value\"}\n", http.StatusBadRequest},
+		{"7", ts, args{serverAPI: server500, Method: "POST", Url: "/api/address/search", Body: strings.NewReader(bodySearch), token: token}, "{\"error\":\"Internal Server Error\"}\n", http.StatusInternalServerError},
+		{"8", ts, args{serverAPI: server500, Method: "POST", Url: "/api/address/geocode", Body: strings.NewReader(bodyGeo), token: token}, "{\"error\":\"Internal Server Error\"}\n", http.StatusInternalServerError},
+		{"9", ts, args{serverAPI: serverSearch, Method: "POST", Url: "/api/address/search", Body: strings.NewReader(bodySearch), token: "123"}, "{\"error\":\"403 Forbidden\"}\n", http.StatusForbidden},
 	}
 
 	for _, tt := range tests {
@@ -116,6 +115,7 @@ func Test_handleRoutes(t *testing.T) {
 			testGeoHost = tt.args.serverAPI.URL
 			req, _ := http.NewRequest(tt.args.Method, tt.server.URL+tt.args.Url, tt.args.Body)
 			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", tt.args.token)
 			res, err := http.DefaultClient.Do(req)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.wantStatus, res.StatusCode)
@@ -123,6 +123,61 @@ func Test_handleRoutes(t *testing.T) {
 			defer res.Body.Close()
 			buf.ReadFrom(res.Body)
 			assert.Equal(t, tt.want, buf.String())
+		})
+	}
+}
+
+func Test_handleLoginRegister(t *testing.T) {
+	router := getProxyRouter("http://hugo", ":1313")
+	ts := httptest.NewServer(router.r)
+	defer ts.Close()
+
+	bodyRegister1 := `{"login":"User1", "password": "qwerty"}`
+	bodyLogin1 := `{"login":"User1", "password": "qwerty1"}`
+	bodyLogin2 := `{"login":"User2", "password": "qwerty1"}`
+
+	//pass, _ := bcrypt.GenerateFromPassword([]byte("qwerty"), 0)
+	//user := User{"login": "User1", "password": pass}
+	//_, tokenString, _ := tokenAuth.Encode(user)
+	//token := tokenResponse{"Bearer " + tokenString}
+	//tokenByte, _ := json.Marshal(token)
+	wantRegister1 := "{\"access_token\":\"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJsb2dpbiI6IlVzZXIxIiwicGFzc3dvcmQiOiIkMmEkMTAkaVUyaTQuTGdhdnEuZE9rdmtoZDZyZVY4QUVNbm1CLy5KWmJCOVpMZ2ZSYXVHY2ZnOHZWWmUifQ.h3iq4QISSdE1x4m7vVv9_U9fZukQagVlxvodMuwXaro\"}"
+
+	type args struct {
+		Method string
+		Url    string
+		Body   io.Reader
+	}
+
+	tests := []struct {
+		name       string
+		server     *httptest.Server
+		args       args
+		want       string
+		wantStatus int
+	}{
+		{"1", ts, args{Method: "POST", Url: "/api/register", Body: strings.NewReader(bodyRegister1)}, wantRegister1, http.StatusOK},
+		{"2", ts, args{Method: "POST", Url: "/api/login", Body: strings.NewReader(bodyRegister1)}, wantRegister1, http.StatusOK},
+		{"3", ts, args{Method: "GET", Url: "/api/register", Body: strings.NewReader(bodyRegister1)}, "{\"error\":\"Method not allowed\"}\n", http.StatusMethodNotAllowed},
+		{"4", ts, args{Method: "GET", Url: "/api/login", Body: strings.NewReader(bodyRegister1)}, "{\"error\":\"Method not allowed\"}\n", http.StatusMethodNotAllowed},
+		{"5", ts, args{Method: "POST", Url: "/api/register", Body: strings.NewReader(`dk&&*^jd@!)54;fjh`)}, "{\"error\":\"bad request: main.go 114: error read body userRequest: invalid character 'd' looking for beginning of value\"}\n", http.StatusBadRequest},
+		{"6", ts, args{Method: "POST", Url: "/api/login", Body: strings.NewReader(`dk&&*^jd@!)54;fjh`)}, "{\"error\":\"bad request: main.go 185: error read body userRequest: invalid character 'd' looking for beginning of value\"}\n", http.StatusBadRequest},
+		{"7", ts, args{Method: "POST", Url: "/api/register", Body: strings.NewReader(bodyRegister1)}, "{\"error\":\"User already exists\"}\n", http.StatusConflict},
+		{"8", ts, args{Method: "POST", Url: "/api/login", Body: strings.NewReader(bodyLogin1)}, "{\"error\":\"Wrong password\"}\n", http.StatusNotFound},
+		{"9", ts, args{Method: "POST", Url: "/api/login", Body: strings.NewReader(bodyLogin2)}, "{\"error\":\"User not found\"}\n", http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest(tt.args.Method, tt.server.URL+tt.args.Url, tt.args.Body)
+			req.Header.Set("Content-Type", "application/json")
+			res, err := http.DefaultClient.Do(req)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantStatus, res.StatusCode)
+			buf := new(bytes.Buffer)
+			defer res.Body.Close()
+			buf.ReadFrom(res.Body)
+			assert.Equal(t, tt.want[:20], buf.String()[:20])
 		})
 	}
 }

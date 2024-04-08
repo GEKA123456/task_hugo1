@@ -30,11 +30,15 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/jwtauth/v5"
+	"github.com/lestrrat-go/jwx/v2/jwt"
+	"golang.org/x/crypto/bcrypt"
 )
 
 //go:generate swagger generate spec -o ./docs/swagger.json --scan-models
@@ -49,28 +53,206 @@ type Router struct {
 	r *chi.Mux
 }
 
+var tokenAuth *jwtauth.JWTAuth
+
+func init() {
+	tokenAuth = jwtauth.New("HS256", []byte("salt_01"), nil)
+}
+
+func Authenticator(ja *jwtauth.JWTAuth) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		hfn := func(w http.ResponseWriter, r *http.Request) {
+			token, _, err := jwtauth.FromContext(r.Context())
+
+			if err != nil || token == nil || jwt.Validate(token, ja.ValidateOptions()...) != nil {
+				resErr := NewErrorResponse("403 Forbidden")
+				w.Header().Set("Content-Type", "application/json")
+				resErrStr, _ := json.Marshal(resErr)
+				http.Error(w, string(resErrStr), http.StatusForbidden)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		}
+		return http.HandlerFunc(hfn)
+	}
+}
+
+// swagger:model userRequest
+type UserRequest struct {
+	// user login
+	//
+	// example: user1
+	Login string `json:"login"`
+	// user password
+	//
+	// example: qwerty
+	Password string `json:"password"`
+}
+
+// swagger:model tokenResponse
+type tokenResponse struct {
+	// access token
+	//
+	// example: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWV9.TJVA95OrM7E2cBab30RMHrHDcEfxjoYZgeFONFh7HgQ
+	AccessToken string `json:"access_token"`
+}
+
+type User map[string]interface{}
+
+var Users map[string]User = make(map[string]User)
+
+func handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		resErr := NewErrorResponse("Method not allowed")
+		w.Header().Set("Content-Type", "application/json")
+		resErrStr, _ := json.Marshal(resErr)
+		http.Error(w, string(resErrStr), http.StatusMethodNotAllowed)
+		return
+	}
+
+	userInput, err := getUserReq(r)
+	if err != nil {
+		log.Println(err)
+		resErr := NewErrorResponse(fmt.Sprintf("bad request: %v", err))
+		w.Header().Set("Content-Type", "application/json")
+		resErrStr, _ := json.Marshal(resErr)
+		http.Error(w, string(resErrStr), http.StatusBadRequest)
+		return
+	}
+
+	if _, ok := Users[userInput.Login]; ok {
+		resErr := NewErrorResponse("User already exists")
+		w.Header().Set("Content-Type", "application/json")
+		resErrStr, _ := json.Marshal(resErr)
+		http.Error(w, string(resErrStr), http.StatusConflict)
+		return
+	}
+
+	pass, _ := bcrypt.GenerateFromPassword([]byte(userInput.Password), 0)
+	/*if err != nil {
+		_, _, line, _ := runtime.Caller(1)
+		log.Printf("main.go %v: error generate hashpassword: %v", line, err)
+		resErr := NewErrorResponse("Internal Server Error")
+		w.Header().Set("Content-Type", "application/json")
+		resErrStr, _ := json.Marshal(resErr)
+		http.Error(w, string(resErrStr), http.StatusInternalServerError)
+		return
+	}*/
+
+	Users[userInput.Login] = User{
+		"login":    userInput.Login,
+		"password": string(pass),
+	}
+	_, tokenString, _ := tokenAuth.Encode(Users[userInput.Login])
+	/*if err != nil {
+		_, _, line, _ := runtime.Caller(1)
+		log.Printf("main.go %v: error generate token: %v", line, err)
+		resErr := NewErrorResponse("Internal Server Error")
+		w.Header().Set("Content-Type", "application/json")
+		resErrStr, _ := json.Marshal(resErr)
+		http.Error(w, string(resErrStr), http.StatusInternalServerError)
+		return
+	}*/
+
+	token := tokenResponse{"Bearer " + tokenString}
+	w.Header().Set("Content-Type", "application/json")
+	tokenByte, _ := json.Marshal(token)
+
+	w.Write(tokenByte)
+}
+
+func getUserReq(r *http.Request) (UserRequest, error) {
+	var userInput UserRequest
+	err := json.NewDecoder(r.Body).Decode(&userInput)
+	defer r.Body.Close()
+	if err != nil {
+		_, _, line, _ := runtime.Caller(1)
+		return userInput, fmt.Errorf("main.go %v: error read body userRequest: %v", line, err)
+	}
+	return userInput, err
+}
+
+func handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		resErr := NewErrorResponse("Method not allowed")
+		w.Header().Set("Content-Type", "application/json")
+		resErrStr, _ := json.Marshal(resErr)
+		http.Error(w, string(resErrStr), http.StatusMethodNotAllowed)
+		return
+	}
+
+	userInput, err := getUserReq(r)
+	if err != nil {
+		log.Println(err)
+		resErr := NewErrorResponse(fmt.Sprintf("bad request: %v", err))
+		w.Header().Set("Content-Type", "application/json")
+		resErrStr, _ := json.Marshal(resErr)
+		http.Error(w, string(resErrStr), http.StatusBadRequest)
+		return
+	}
+
+	if _, ok := Users[userInput.Login]; !ok {
+		resErr := NewErrorResponse("User not found")
+		w.Header().Set("Content-Type", "application/json")
+		resErrStr, _ := json.Marshal(resErr)
+		http.Error(w, string(resErrStr), http.StatusNotFound)
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(Users[userInput.Login]["password"].(string)), []byte(userInput.Password)); err != nil {
+		resErr := NewErrorResponse("Wrong password")
+		w.Header().Set("Content-Type", "application/json")
+		resErrStr, _ := json.Marshal(resErr)
+		http.Error(w, string(resErrStr), http.StatusNotFound)
+		return
+	}
+
+	_, tokenString, _ := tokenAuth.Encode(Users[userInput.Login])
+	/*if err != nil {
+		_, _, line, _ := runtime.Caller(1)
+		log.Printf("main.go %v: error generate token: %v", line, err)
+		resErr := NewErrorResponse("Internal Server Error")
+		w.Header().Set("Content-Type", "application/json")
+		resErrStr, _ := json.Marshal(resErr)
+		http.Error(w, string(resErrStr), http.StatusInternalServerError)
+		return
+	}*/
+
+	token := tokenResponse{"Bearer " + tokenString}
+	w.Header().Set("Content-Type", "application/json")
+	tokenByte, _ := json.Marshal(token)
+
+	w.Write(tokenByte)
+}
+
 func (router *Router) handleRoutes() {
 	router.r.HandleFunc("/api/", handleHello)
 
-	// swagger:operation POST /api/address/search search postSearch
+	// swagger:operation POST /api/login user postLoginUser
 	//
-	// Search for addresses by query string
+	// Login user
 	//
 	// ---
 	// parameters:
-	//   - name: query
+	//   - name: userRequest
 	//     in: body
 	//     required: true
 	//     schema:
-	//       $ref: "#/definitions/searchRequest"
+	//       $ref: "#/definitions/userRequest"
 	// responses:
 	//   "200":
-	//     description: search results
+	//     description: successfully logged in
 	//     in: body
 	//     schema:
-	//       $ref: "#/definitions/searchResponse"
+	//       $ref: "#/definitions/tokenResponse"
 	//   "400":
 	//     description: bad request
+	//     in: body
+	//     schema:
+	//       $ref: "#/definitions/errorResponse"
+	//   "404":
+	//     description: user not found or wrong password
 	//     in: body
 	//     schema:
 	//       $ref: "#/definitions/errorResponse"
@@ -79,27 +261,32 @@ func (router *Router) handleRoutes() {
 	//     in: body
 	//     schema:
 	//       $ref: "#/definitions/errorResponse"
-	router.r.HandleFunc("/api/address/search", handleGeoSearch)
+	router.r.HandleFunc("/api/login", handleLogin)
 
-	// swagger:operation POST /api/address/geocode geoCode postGeo
+	// swagger:operation POST /api/register user postRegisterUser
 	//
-	// Search for addresses by longitude and latitude
+	// Register user
 	//
 	// ---
 	// parameters:
-	//   - name: query
+	//   - name: userRequest
 	//     in: body
 	//     required: true
 	//     schema:
-	//       $ref: "#/definitions/geocodeRequest"
+	//       $ref: "#/definitions/userRequest"
 	// responses:
 	//   "200":
-	//     description: geoCode results
+	//     description: successfully registered
 	//     in: body
 	//     schema:
-	//       $ref: "#/definitions/geocodeResponse"
+	//       $ref: "#/definitions/tokenResponse"
 	//   "400":
 	//     description: bad request
+	//     in: body
+	//     schema:
+	//       $ref: "#/definitions/errorResponse"
+	//   "409":
+	//     description: user already exists
 	//     in: body
 	//     schema:
 	//       $ref: "#/definitions/errorResponse"
@@ -108,7 +295,93 @@ func (router *Router) handleRoutes() {
 	//     in: body
 	//     schema:
 	//       $ref: "#/definitions/errorResponse"
-	router.r.HandleFunc("/api/address/geocode", handleGeoCode)
+	router.r.HandleFunc("/api/register", handleRegister)
+
+	router.r.Group(func(r chi.Router) {
+		r.Use(jwtauth.Verifier(tokenAuth))
+
+		r.Use(Authenticator(tokenAuth))
+
+		// swagger:operation POST /api/address/search search postSearch
+		//
+		// Search for addresses by query string
+		//
+		// ---
+		// parameters:
+		//   - name: query
+		//     in: body
+		//     required: true
+		//     schema:
+		//       $ref: "#/definitions/searchRequest"
+		//   - name: Authorization
+		//     in: header
+		//     type: string
+		//     required: true
+		//     description: Bearer token for user authentication
+		//     example: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ
+		// responses:
+		//   "200":
+		//     description: search results
+		//     in: body
+		//     schema:
+		//       $ref: "#/definitions/searchResponse"
+		//   "400":
+		//     description: bad request
+		//     in: body
+		//     schema:
+		//       $ref: "#/definitions/errorResponse"
+		//   "403":
+		//     description: forbidden
+		//     in: body
+		//     schema:
+		//       $ref: "#/definitions/errorResponse"
+		//   "500":
+		//     description: internal server error
+		//     in: body
+		//     schema:
+		//       $ref: "#/definitions/errorResponse"
+		r.HandleFunc("/api/address/search", handleGeoSearch)
+
+		// swagger:operation POST /api/address/geocode geoCode postGeo
+		//
+		// Search for addresses by longitude and latitude
+		//
+		// ---
+		// parameters:
+		//   - name: query
+		//     in: body
+		//     required: true
+		//     schema:
+		//       $ref: "#/definitions/geocodeRequest"
+		//   - name: Authorization
+		//     in: header
+		//     type: string
+		//     required: true
+		//     description: Bearer token for user authentication
+		//     example: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ
+		// responses:
+		//   "200":
+		//     description: geoCode results
+		//     in: body
+		//     schema:
+		//       $ref: "#/definitions/geocodeResponse"
+		//   "400":
+		//     description: bad request
+		//     in: body
+		//     schema:
+		//       $ref: "#/definitions/errorResponse"
+		//   "403":
+		//     description: forbidden
+		//     in: body
+		//     schema:
+		//       $ref: "#/definitions/errorResponse"
+		//   "500":
+		//     description: internal server error
+		//     in: body
+		//     schema:
+		//       $ref: "#/definitions/errorResponse"
+		r.HandleFunc("/api/address/geocode", handleGeoCode)
+	})
 }
 
 func handleHello(w http.ResponseWriter, r *http.Request) {
@@ -170,12 +443,13 @@ func getSearchResp(reqInput *SearchRequest) (*SearchResponse, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("main.go 90: error request dadata.ru/api: %v", err)
+		_, _, line, _ := runtime.Caller(1)
+		return nil, fmt.Errorf("main.go %v: error request dadata.ru/api: %v", line, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("main.go 90: error status %v dadata.ru/api", resp.StatusCode)
+		return nil, fmt.Errorf("error status %v dadata.ru/api", resp.StatusCode)
 	}
 
 	body, _ := io.ReadAll(resp.Body)
@@ -200,7 +474,8 @@ func getSearchReq(r *http.Request) (*SearchRequest, error) {
 	err := json.NewDecoder(r.Body).Decode(addr)
 	defer r.Body.Close()
 	if err != nil {
-		return nil, fmt.Errorf("main.go 119: error read body Search: %v", err)
+		_, _, line, _ := runtime.Caller(1)
+		return nil, fmt.Errorf("main.go %v: error read body Search: %v", line, err)
 	}
 	return addr, nil
 }
@@ -259,12 +534,13 @@ func getGeoResp(reqInput *GeocodeRequest) (*GeocodeResponse, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("main.go 194: error request dadata.ru/api: %v", err)
+		_, _, line, _ := runtime.Caller(1)
+		return nil, fmt.Errorf("main.go %v: error request dadata.ru/api: %v", line, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("main.go 194: error status %v dadata.ru/api", resp.StatusCode)
+		return nil, fmt.Errorf("error status %v dadata.ru/api", resp.StatusCode)
 	}
 
 	body, _ := io.ReadAll(resp.Body)
@@ -289,7 +565,8 @@ func getGeoReq(r *http.Request) (*GeocodeRequest, error) {
 	err := json.NewDecoder(r.Body).Decode(coord)
 	defer r.Body.Close()
 	if err != nil {
-		return nil, fmt.Errorf("main.go 217: error read body geoCode: %v", err)
+		_, _, line, _ := runtime.Caller(1)
+		return nil, fmt.Errorf("main.go %v: error read body geoCode: %v", line, err)
 	}
 	return coord, nil
 }
@@ -302,13 +579,13 @@ func main() {
 }
 
 func getProxyRouter(host, port string) *Router {
-	r := &Router{r: chi.NewRouter()}
+	router := &Router{r: chi.NewRouter()}
 
-	r.r.Use(NewReverseProxy(host, port).ReverseProxy)
+	router.r.Use(NewReverseProxy(host, port).ReverseProxy)
 
-	r.handleRoutes()
+	router.handleRoutes()
 
-	return r
+	return router
 }
 
 type ReverseProxy struct {
